@@ -4,7 +4,7 @@ from __future__ import division
 from __future__ import unicode_literals
 
 import pdfmadness
-from pdfmadness import PdfFile, PdfProp
+from pdfmadness import PdfFile, PdfProp, PdfFontGlyph
 from lxml import etree
 from cStringIO import StringIO
 from itertools import ifilter
@@ -23,7 +23,6 @@ import struct
 import sys
 import objgraph
 import gc
-import weakref
 
 from pympler import muppy, summary
 
@@ -61,6 +60,7 @@ class SwfPdf(object):
 
 		self.pdf.write(fs)
 		fs.flush()
+
 
 class SwfXml(object):
 
@@ -188,7 +188,6 @@ class SwfXml(object):
 
 	def make(self, pdf):
 
-
 		page_instructions = []
 
 		for placer in self.place_objects:
@@ -259,7 +258,7 @@ class SwfDefineText(object):
 			section_x = self.x + (int(record.get("x")) if "x" in record.attrib else 0)
 			section_y = self.y + (int(record.get("y")) if "y" in record.attrib else 0)
 
-			self.instructions.append("/page-{}-font-{} {} Tf".format(swf.id, cur_font.id, cur_font_size))
+			self.instructions.append("/{} {} Tf".format(cur_font.name, cur_font_size))
 
 			if first_record or ("x" in record.attrib and "y" in record.attrib):
 				self.instructions.append("1 0 0 1 {} {} Tm".format(swf.scale_x(section_x), swf.scale_y_real(section_y, 0)))
@@ -377,7 +376,7 @@ class SwfImageShape(object):
 		img_obj_id = bitmap_node.get("objectID")
 		self.actual_image = swf.objects[img_obj_id]
 
-		img_rect = node.find('./bounds/Rectangle')
+		img_rect = node.find('./bounds/Rectangle') 
 		img_width = int(img_rect.get("right")) - int(img_rect.get("left"))
 		img_height = int(img_rect.get("bottom")) - int(img_rect.get("top"))
 
@@ -454,8 +453,8 @@ class SwfFont(object):
 
 		self.id = font_id
 
-		self.name = "page-{}-font-{}".format(swf.id, self.id)
-		self.glyph_mapping = dict()
+		self.name = node.get('name')
+		self.glyphs = dict()
 
 		self.advances = []
 		for advance in node.find('./advance'):
@@ -464,7 +463,6 @@ class SwfFont(object):
 		self.glyphs = []
 		for i, glyph in enumerate(node.find('./glyphs')):
 			swf_glyph = SwfGlyph(glyph, self.advances[i])
-			self.glyph_mapping[swf_glyph.map] = swf_glyph
 			if swf_glyph.map > 127: continue
 
 			self.glyphs.append(swf_glyph)
@@ -472,89 +470,10 @@ class SwfFont(object):
 
 	def write(self, page, page_instructions, pdf):
 
-		first_glyph_map = self.glyphs[0].map
-		last_glyph_map = self.glyphs[-1].map
+		font = pdf.font_collection.add_font(self.name)
 
-		#print first_glyph_map, last_glyph_map
-
-		char_names = []
-		filled_advances = []
-		differences = []
-		hexed = []
-		last_char = -1
-
-		for char in range(first_glyph_map, last_glyph_map+1):
-			advance = 0
-			char_name = "{}-{}".format(self.name, char)
-			char_graphics = ""
-
-			if char in self.glyph_mapping:
-				glyph = self.glyph_mapping[char]
-
-				advance = glyph.advance
-				char_graphics = str(glyph)
-				pdf.add_object(name=char_name, stream=char_graphics)
-				char_names.append(char_name)
-
-				if last_char + 1 != char:
-					differences.append("{} /{}\n".format(char, char_name))
-				else:
-					differences.append("/{}\n".format(char_name))
-
-				last_char = char
-
-
-				hexed.append(hex(char)[2:].zfill(4))
-
-			filled_advances.append(advance // 20)
-
-		#print "<{}>".format("".join(hexed))
-		char_procs_props = []
-		for name in char_names:
-			char_procs_props.append(PdfProp(name, "<%{}%>".format(name)))
-
-		pdf.add_object(name="{}-char_procs".format(self.name), props=char_procs_props)
-
-		pdf.add_object(name="{}-encoding".format(self.name), props=[
-			PdfProp("Type", "/Encoding"),
-			PdfProp("BaseEncoding", "/WinAnsiEncoding"),
-			PdfProp("Differences", "[{}]".format(" ".join(differences)))
-		])
-
-		pdf.add_object(name="{}-tounicode".format(self.name), stream="""/CIDInit /ProcSet findresource begin
-12 dict begin
-begincmap
-/CIDSystemInfo
-<</Registry (Adobe)
-/Ordering (UCS)
-/Supplement 0
->> def
-/CMapName /Adobe-Identity-UCS def
-/CMapType 2 def
-1 begincodespacerange
-<0000> <FFFF>
-endcodespacerange
-1 beginbfrange
-<0000> <FFFF> <0000>
-endbfrange
-endcmap
-CMapName currentdict /CMap defineresource pop
-end
-end""")
-
-		pdf.add_object(name=self.name[:], props=[
-			PdfProp("Type", "/Font"),
-			PdfProp("Subtype", "/Type3"),
-			PdfProp("Name", "({})".format(self.name)),
-			PdfProp("FontBBox", "[0 0 1024 1024]"),
-			PdfProp("FontMatrix", "[0.001 0 0 0.001 0 0]"),
-			PdfProp("CharProcs", "<%{}-char_procs%>".format(self.name)),
-			PdfProp("Encoding", "<%{}-encoding%>".format(self.name)),
-			#PdfProp("ToUnicode", "<%{}-tounicode%>".format(self.name)),
-			PdfProp("FirstChar", first_glyph_map),
-			PdfProp("LastChar", last_glyph_map),
-			PdfProp("Widths", "[{}]".format(" ".join(map(str, filled_advances))))
-		])
+		for glyph in self.glyphs:
+			font.add_glyph(PdfFontGlyph("\n".join(glyph.instructions), glyph.map, glyph.advance))
 
 		page.font_resources.append("/{0} <%{0}%>".format(self.name))
 
@@ -609,7 +528,7 @@ def main():
 
 	metadata = []
 	with package.open("metadata.txt") as metadata_file:
-		metadata.extend(map(str.strip, metadata_file))
+		metadata.extend(map(str.strip, metadata_file)[:])
 
 	merger = PdfFileMerger()
 	swf_pdf = SwfPdf()
