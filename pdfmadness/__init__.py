@@ -112,6 +112,10 @@ class PdfFontCollection(object):
 			self.fonts[name] = PdfFont(name)
 		return self.fonts[name]
 
+	def get_font_names(self, name):
+		font = self.fonts[name]
+		return map(lambda x: "{}-{}".format(font.name, x), font.get_sections())
+
 class PdfFont(object):
 
 	def __init__(self, name):
@@ -121,46 +125,55 @@ class PdfFont(object):
 	def add_glyph(self, glyph):
 		self.glyph_mapping[glyph.mapping] = glyph
 
+	def get_sections(self):
+		names = []
+		used_names = set()
+
+		for i in range(1, 65536):
+			if i in self.glyph_mapping and i // 256 not in used_names:
+				names.append(i // 256)
+				used_names.add(i // 256)
+
+		return names
+
 	def write(self, pdf):
 
-		first_glyph = min(self.glyph_mapping.values(), key=lambda x: x.mapping)
-		last_glyph = max(self.glyph_mapping.values(), key=lambda x: x.mapping)
+		for section in self.get_sections():
 
-		char_procs_props = []
-		filled_advances = []
-		differences = []
-		last_char = -1
+			char_procs_props = []
+			filled_advances = []
+			differences = []
+			last_char = -1
 
-		for char in range(first_glyph.mapping, last_glyph.mapping + 1):
-			advance = 0
-			char_name = "{}-{}".format(self.name, char)
-			char_graphics = ""
+			differences.append("0")
 
-			if char in self.glyph_mapping:
-				glyph = self.glyph_mapping[char]
+			for char in range(section * 256, (section + 1) * 256):
+				advance = 0
+				char_name = "{}-{}-{}".format(self.name, section, char)
 
-				advance = glyph.advance
-				pdf.add_object(name=char_name, stream=glyph.draw_instructions)
-				char_procs_props.append(PdfProp(char_name, "<%{}%>".format(char_name)))
+				if char in self.glyph_mapping:
+					glyph = self.glyph_mapping[char]
 
-				if last_char + 1 != char:
-					differences.append("{} /{}\n".format(char, char_name))
-				else:
+					advance = glyph.advance
+					pdf.add_object(name=char_name, stream=glyph.draw_instructions)
+					char_procs_props.append(PdfProp(char_name, "<%{}%>".format(char_name)))
+
+					if last_char + 1 != char % 256:
+						differences.append("{}".format(char % 256))
+						last_char = char % 256
 					differences.append("/{}\n".format(char_name))
 
-				last_char = char
+				#filled_advances.append(0)
+				filled_advances.append(advance // 20)
 
-			filled_advances.append(advance // 20)
+			pdf.add_object(name="{}-{}-char_procs".format(self.name, section), props=char_procs_props)
 
-		pdf.add_object(name="{}-char_procs".format(self.name), props=char_procs_props)
+			pdf.add_object(name="{}-{}-encoding".format(self.name, section), props=[
+				PdfProp("Type", "/Encoding"),
+				PdfProp("Differences", "[{}]".format(" ".join(differences)))
+			])
 
-		pdf.add_object(name="{}-encoding".format(self.name), props=[
-			PdfProp("Type", "/Encoding"),
-			PdfProp("BaseEncoding", "/WinAnsiEncoding"),
-			PdfProp("Differences", "[{}]".format(" ".join(differences)))
-		])
-
-		pdf.add_object(name="{}-tounicode".format(self.name), stream="""/CIDInit /ProcSet findresource begin
+			pdf.add_object(name="{}-{}-tounicode".format(self.name, section), stream="""/CIDInit /ProcSet findresource begin
 12 dict begin
 begincmap
 /CIDSystemInfo
@@ -181,19 +194,19 @@ CMapName currentdict /CMap defineresource pop
 end
 end""")
 
-		pdf.add_object(name=self.name, props=[
-			PdfProp("Type", "/Font"),
-			PdfProp("Subtype", "/Type3"),
-			PdfProp("Name", "({})".format(self.name)),
-			PdfProp("FontBBox", "[0 0 1024 1024]"),
-			PdfProp("FontMatrix", "[0.001 0 0 0.001 0 0]"),
-			PdfProp("CharProcs", "<%{}-char_procs%>".format(self.name)),
-			PdfProp("Encoding", "<%{}-encoding%>".format(self.name)),
-			#PdfProp("ToUnicode", "<%{}-tounicode%>".format(self.name)),
-			PdfProp("FirstChar", first_glyph.mapping),
-			PdfProp("LastChar", last_glyph.mapping),
-			PdfProp("Widths", "[{}]".format(" ".join(map(str, filled_advances))))
-		])
+			pdf.add_object(name="{}-{}".format(self.name, section), props=[
+				PdfProp("Type", "/Font"),
+				PdfProp("Subtype", "/Type3"),
+				PdfProp("Name", "({}-{})".format(self.name, section)),
+				PdfProp("FontBBox", "[0 0 1024 1024]"),
+				PdfProp("FontMatrix", "[0.001 0 0 0.001 0 0]"),
+				PdfProp("CharProcs", "<%{}-{}-char_procs%>".format(self.name, section)),
+				PdfProp("Encoding", "<%{}-{}-encoding%>".format(self.name, section)),
+				#PdfProp("ToUnicode", "<%{}-tounicode%>".format(self.name)),
+				PdfProp("FirstChar", 0),
+				PdfProp("LastChar", 255),
+				PdfProp("Widths", "[{}]".format(" ".join(map(str, filled_advances))))
+			])
 
 
 class PdfFontGlyph(object):

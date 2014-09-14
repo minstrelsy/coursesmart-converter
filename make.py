@@ -23,6 +23,7 @@ import struct
 import sys
 import objgraph
 import gc
+import string
 
 from pympler import muppy, summary
 
@@ -64,7 +65,7 @@ class SwfPdf(object):
 
 class SwfXml(object):
 
-	ignored_tags = { 'FileAttributes', 'SetBackgroundColor', 'CSMTextSettings', 'ShowFrame', 'End' }
+	ignored_tags = { 'FileAttributes', 'SetBackgroundColor', 'CSMTextSettings', 'ShowFrame', 'End', 'DefineFont2', 'DefineEditText', 'PlaceObject3' }
 	current_id = 0
 
 	#@profile
@@ -192,13 +193,16 @@ class SwfXml(object):
 
 		for placer in self.place_objects:
 
+			if placer.get('clipDepth'):
+				continue
+
 			target_obj_id = placer.get("objectID")
 			if not target_obj_id in self.objects:
 				print "Target id not found: {}".format(target_obj_id)
 				continue
 
 			obj = self.objects[target_obj_id]
-			if isinstance(obj, (SwfImageShape, SwfDefineText)):
+			if isinstance(obj, (SwfImageShape, SwfDefineText, SwfShape)):
 				obj.write(self, page_instructions, pdf)
 
 		for font in self.fonts:
@@ -221,6 +225,8 @@ class SwfDefineText(object):
 	def __init__(self, swf, node, obj_id):
 		self.id = obj_id
 
+		#if self.id == "57": import pdb; pdb.set_trace()
+
 		tranform = node.find('./transform/Transform')
 
 		self.x = int(tranform.get("transX"))
@@ -231,13 +237,13 @@ class SwfDefineText(object):
 		cur_font = None
 		cur_color = None
 		cur_font_size = 12
-		last_leading = 0
+		#last_leading = 0
 
 		g = []
 		first_record = True
 
-		self.instructions.append("BT")
 		self.instructions.append("q")
+		self.instructions.append("BT")
 
 		for outer_record in node.find('./records'):
 
@@ -255,41 +261,41 @@ class SwfDefineText(object):
 			if record.find('./color') is not None:
 				cur_color = record.find('./color/Color')
 
-			section_x = self.x + (int(record.get("x")) if "x" in record.attrib else 0)
-			section_y = self.y + (int(record.get("y")) if "y" in record.attrib else 0)
-
-			self.instructions.append("/{} {} Tf".format(cur_font.name, cur_font_size))
+			section_x = self.x + (struct.unpack('h', struct.pack('H', int(record.get("x"))))[0] if "x" in record.attrib else 0)
+			section_y = self.y + (struct.unpack('h', struct.pack('H', int(record.get("y"))))[0] if "y" in record.attrib else 0)
 
 			if first_record or ("x" in record.attrib and "y" in record.attrib):
 				self.instructions.append("1 0 0 1 {} {} Tm".format(swf.scale_x(section_x), swf.scale_y_real(section_y, 0)))
 
 			text_instr = []
 
-			if last_leading:
-				text_instr.append("-{}".format(last_leading))
+			#if last_leading:
+			#	text_instr.append("-{}".format(last_leading))
+
+			self.instructions.append("{} {} {} rg".format(int(cur_color.get("red")) / 255, int(cur_color.get("green")) / 255, int(cur_color.get("blue")) / 255))
+
+			last_font = ""
 
 			for glyph in record.find('./glyphs'):
 
-				if len(cur_font.glyphs) <= int(glyph.get("glyph")): continue
-
 				c = cur_font.glyphs[int(glyph.get("glyph"))].map
-				if c < 128:
-					text_instr.append("<{:02x}> -{}".format(c, int(glyph.get("advance")) / 2))
-					last_leading = int(glyph.get("advance"))
+				adv = cur_font.glyphs[int(glyph.get("glyph"))].advance
+				#if self.id == "57": print chr(c), int(glyph.get("glyph"))
 
-			#if text_instr and "(C)" in text_instr[0]:
-			#	print record, text_instr
+				section_font = "{}-{}".format(cur_font.name, c // 256)
+				if section_font != last_font:
+					self.instructions.append("/{} {} Tf".format(section_font, cur_font_size))
+					last_font = section_font
 
-			self.instructions.append("{} {} {} RG".format(int(cur_color.get("red")) / 255, int(cur_color.get("green")) / 255, int(cur_color.get("blue")) / 255))
-			self.instructions.append("{} {} {} rg".format(int(cur_color.get("red")) / 255, int(cur_color.get("green")) / 255, int(cur_color.get("blue")) / 255))
-
-
-			self.instructions.append("[{}] TJ".format(b" ".join(text_instr)))
+				self.instructions.append("[<{:02x}> {}] TJ".format(c % 256, -(swf.scale_x(int(glyph.get("advance")) / cur_font_size * 1000) - (adv / 20 * (1000/1024)))))
+				#text_instr.append("<{:02x}> {}".format(c, int(glyph.get("advance")) / 20))
+				#last_leading = int(glyph.get("advance"))
+				#print chr(c), int(glyph.get("advance")), adv / 20, swf.scale_x(int(glyph.get("advance")))
 
 			first_record = False
 
-		self.instructions.append("Q")
 		self.instructions.append("ET")
+		self.instructions.append("Q")
 		pass
 
 	def write(self, page, page_instructions, pdf):
@@ -320,7 +326,15 @@ class SwfImageLossless(object):
 
 		color_table = [struct.unpack('<BBB', data.read(3)) for _ in range(n_colormap+1)]
 
-		image.putdata([color_table[struct.unpack('<B', data.read(1))[0]] for _ in range(width) for _ in range(height)])
+		pixels = []
+		for _ in range(height):
+			for _ in range(width):
+				pixels.append(color_table[struct.unpack('<B', data.read(1))[0]])
+
+			#account for padding
+			data.read(width % 4)
+
+		image.putdata(pixels)
 		self.data = image.tobytes("jpeg", "RGB")
 
 
@@ -344,11 +358,11 @@ class SwfImage(object):
 		self.id = obj_id
 
 		jpeg_data = bytearray(base64.b64decode(node.find('./data/data').text))
-		start_index = jpeg_data.find(b'\xff\xd9\xff\xd8')
-		del jpeg_data[start_index:start_index+4]
+		
+		image = Image.open(io.BytesIO(jpeg_data))
+		self.data = image.tobytes("jpeg", "RGB")
 
-		self.data = bytes(jpeg_data)
-		image = Image.open(io.BytesIO(self.data))
+		open("image-{}.jpeg".format(obj_id), 'wb').write(self.data)
 
 		self.size = image.size
 
@@ -374,16 +388,30 @@ class SwfImageShape(object):
 
 		bitmap_node = node.find('./styles/StyleList/fillStyles/ClippedBitmap')
 		img_obj_id = bitmap_node.get("objectID")
+		if img_obj_id not in swf.objects:
+			print "image not found"
+			return
+
 		self.actual_image = swf.objects[img_obj_id]
+
+		open("image-{}.jpeg".format(img_obj_id), "wb").write(self.actual_image.data)
 
 		img_rect = node.find('./bounds/Rectangle') 
 		img_width = int(img_rect.get("right")) - int(img_rect.get("left"))
 		img_height = int(img_rect.get("bottom")) - int(img_rect.get("top"))
 
+		transform_matrix = bitmap_node.find('./matrix/Transform')
+
+		img_scale_x = float(transform_matrix.get('scaleX'))
+		img_scale_y = float(transform_matrix.get('scaleY'))
+		img_trans_x = float(transform_matrix.get('transX'))
+		img_trans_y = float(transform_matrix.get('transY'))
+
 		self.instructions = []
 		self.instructions.append("q")
 
-		self.instructions.append("{} 0 0 {} {} {} cm".format(swf.scale_x(img_width), swf.scale_y_raw(img_height), swf.scale_x(int(img_rect.get("left"))), swf.scale_y_top(int(img_rect.get("top")), img_height)))
+		self.instructions.append("{} 0 0 {} {} {} cm".format(swf.scale_x(self.actual_image.size[0]), swf.scale_y_raw(self.actual_image.size[1]), swf.scale_x(img_trans_x), swf.scale_y_top(img_trans_y, img_height)))
+		self.instructions.append("{} 0 0 {} 0 0 cm".format(img_scale_x, img_scale_y))
 		self.instructions.append("/page-{}-img-{} Do".format(swf.id, img_obj_id))
 
 		self.instructions.append("Q")
@@ -401,14 +429,16 @@ class SwfShape(object):
 
 		cur_x = 0
 		cur_y = 0
+
 		self.instructions = []
 		self.instructions.append("q")
 
 		if node.find('./styles/StyleList/fillStyles/Solid') is not None:
 			color_node = node.find('./styles/StyleList/fillStyles/Solid/color/Color')
 			self.instructions.append("{} {} {} rg".format(int(color_node.get("red")) / 255, int(color_node.get("green")) / 255, int(color_node.get("blue")) / 255))
+			#self.instructions.append("1 1 1 rg")
 
-		if node.find('./styles.StyleList.lineStyles.LineStyle') is not None:
+		if node.find('./styles/StyleList/lineStyles/LineStyle') is not None:
 			line_node = node.find('./styles/StyleList/lineStyles/LineStyle')
 			if "width" in line_node.attrib:
 				self.instructions.append("{} w".format(line_node.get("width")))
@@ -463,8 +493,6 @@ class SwfFont(object):
 		self.glyphs = []
 		for i, glyph in enumerate(node.find('./glyphs')):
 			swf_glyph = SwfGlyph(glyph, self.advances[i])
-			if swf_glyph.map > 127: continue
-
 			self.glyphs.append(swf_glyph)
 
 
@@ -475,7 +503,8 @@ class SwfFont(object):
 		for glyph in self.glyphs:
 			font.add_glyph(PdfFontGlyph("\n".join(glyph.instructions), glyph.map, glyph.advance))
 
-		page.font_resources.append("/{0} <%{0}%>".format(self.name))
+		for font_name in pdf.font_collection.get_font_names(self.name):
+			page.font_resources.append("/{0} <%{0}%>".format(font_name))
 
 		pass
 
@@ -530,13 +559,10 @@ def main():
 	with package.open("metadata.txt") as metadata_file:
 		metadata.extend(map(str.strip, metadata_file)[:])
 
-	merger = PdfFileMerger()
 	swf_pdf = SwfPdf()
-
 	i = 0
 
 	for name in metadata:
-		#name = metadata[0]
 		i += 1
 		print i, name
 
@@ -545,6 +571,28 @@ def main():
 		xml = swfxml_process.communicate(single_page)[0]
 		swf_pdf.add_swf(xml)
 
+
+	output = open("output.pdf", "wb")
+	swf_pdf.write(output)
+	output.flush()
+	output.close()
+
+	return
+
+	sh.qpdf("--object-streams=generate", "output.pdf", "output.compressed.pdf")
+
+#@profile
+def main2():
+
+	metadata = ["freepage.swf"]
+
+	swf_pdf = SwfPdf()
+
+	for name in metadata:
+		single_page = open(name, 'rb').read();
+		swfxml_process = subprocess.Popen(['swfmill', 'swf2xml', 'stdin', 'stdout'], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+		xml = swfxml_process.communicate(single_page)[0]
+		swf_pdf.add_swf(xml)
 
 	output = open("output.pdf", "wb")
 	swf_pdf.write(output)
